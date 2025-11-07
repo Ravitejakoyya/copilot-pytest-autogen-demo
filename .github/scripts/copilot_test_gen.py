@@ -72,21 +72,36 @@ def generate_tests_with_copilot(file_path: Path):
     cleaned_lines = []
 
     for line in raw_lines:
-        # Skip known CLI noise or metadata
-        if re.search(r"deprecation|announcement|copilot cli|deprecated", line, re.IGNORECASE):
-            continue
-        if line.strip().startswith(("-", ">", "#")) and "import" not in line and "def " not in line:
-            continue
-        cleaned_lines.append(line)
+        line_stripped = line.strip()
 
+        # Skip noise, URLs, banners, metadata, or generic Copilot text
+        if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
+            continue
+
+        # Skip completely empty or non-code lines
+        if not line_stripped:
+            continue
+
+        # Keep likely Python code lines
+        if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", line_stripped):
+            cleaned_lines.append(line_stripped)
+            continue
+
+        # Keep indented blocks or docstrings
+        if line_stripped.startswith(("    ", '"""', "'''")):
+            cleaned_lines.append(line)
+            continue
+
+    # Join and sanitize markdown fences
     cleaned = "\n".join(cleaned_lines)
-    # Remove Markdown code fences or stray backticks
     cleaned = cleaned.replace("```python", "").replace("```", "").strip()
 
+    # Write the cleaned content
     test_file = TESTS / f"test_{file_path.stem}.py"
     test_file.write_text(cleaned)
-    print(f"✅ Generated {test_file}")
+    print(f"✅ Generated clean test file: {test_file}")
     return test_file
+
 
 # === Run pytest to validate generated tests ===
 def run_pytest():
