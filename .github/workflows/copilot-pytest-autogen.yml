@@ -68,9 +68,9 @@ jobs:
       - name: Run Copilot Test Generator
         run: |
           echo "🚀 Starting Copilot Test Generator..."
-          python .github/scripts/copilot_test_gen.py
+          python .github/scripts/copilot_test_gen.py | tee pytest_output.log
 
-            # 🧾 8️⃣ Post PR Comment Summary (dynamic result detection)
+    # 🧾 8️⃣ Post PR Comment Summary (with test counts)
       - name: Post Copilot Test Summary on PR
         if: always()
         env:
@@ -78,33 +78,47 @@ jobs:
         run: |
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           STATUS="${{ job.status }}"
+          echo "🔍 Detecting test summary..."
 
-          echo "🔍 Detecting test generation outcome..."
+          # Initialize variables
+          TESTS_PASSED=0
+          TESTS_FAILED=0
+          PLACEHOLDER_COUNT=0
 
-          # Check the workflow logs or generated files for key phrases
-          if grep -q "❌ Tests failed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="❌ Copilot test generation or pytest validation failed."
-          elif grep -q "⚠️ Copilot did not generate" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="⚠️ Copilot generated placeholder tests (CLI returned no output)."
-          elif grep -q "✅ Tests passed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="✅ Copilot test generation succeeded and pytest passed."
-          else
-            # If none of the above found, fallback based on job status
-            if [ "$STATUS" = "success" ]; then
-              SUMMARY="✅ Copilot test generation completed successfully."
-            else
-              SUMMARY="❌ Copilot test generation failed or encountered errors."
+          # Parse pytest summary lines from logs (if pytest ran)
+          if [ -f "${GITHUB_WORKSPACE}/pytest_output.log" ]; then
+            if grep -q "failed" "${GITHUB_WORKSPACE}/pytest_output.log"; then
+              TESTS_FAILED=$(grep -Eo "[0-9]+ failed" "${GITHUB_WORKSPACE}/pytest_output.log" | awk '{print $1}' | tail -n1)
+            fi
+            if grep -q "passed" "${GITHUB_WORKSPACE}/pytest_output.log"; then
+              TESTS_PASSED=$(grep -Eo "[0-9]+ passed" "${GITHUB_WORKSPACE}/pytest_output.log" | awk '{print $1}' | tail -n1)
             fi
           fi
 
-          echo "🧾 Preparing comment for PR #$PR_NUMBER ..."
+          # Check for placeholder tests
+          PLACEHOLDER_COUNT=$(grep -R "test_placeholder" tests/ | wc -l || echo 0)
+
+          # Decide result message
+          if [ "$STATUS" = "success" ] && [ "$TESTS_FAILED" -eq 0 ]; then
+            if [ "$PLACEHOLDER_COUNT" -gt 0 ]; then
+              RESULT="⚠️ $TESTS_PASSED tests passed, 0 failed ($PLACEHOLDER_COUNT placeholder test(s))."
+            else
+              RESULT="✅ $TESTS_PASSED tests passed, $TESTS_FAILED failed."
+            fi
+          elif [ "$TESTS_FAILED" -gt 0 ]; then
+            RESULT="❌ $TESTS_FAILED tests failed, $TESTS_PASSED passed."
+          else
+            RESULT="❌ Copilot test generation or pytest validation failed."
+          fi
+
           BODY="🤖 **Copilot Test Automation Summary**  
           • Status: **$STATUS**  
-          • Result: $SUMMARY  
+          • Result: $RESULT  
           _Check workflow logs for details._"
 
+          echo "🧾 Commenting on PR #$PR_NUMBER"
           gh pr comment "$PR_NUMBER" --body "$BODY"
-    
+
 
 
 
