@@ -1,4 +1,4 @@
-import subprocess, sys, json, re
+import subprocess, sys, json, re, os
 from pathlib import Path
 
 # === Base Paths ===
@@ -16,6 +16,26 @@ def sh(cmd, capture=False, check=True):
         print(result.stderr, file=sys.stderr)
         sys.exit(result.returncode)
     return result.stdout if capture else ""
+
+# === Normalize a src/*.py path to an importable module path ===
+def module_import_path(file_path: Path) -> str:
+    """
+    Convert a file path (absolute or relative) into a dotted module path under src/.
+    Examples:
+      /repo/src/mathops.py -> src.mathops
+      src/pkg/util.py      -> src.pkg.util
+    """
+    abs_fp = file_path.resolve()
+    try:
+        rel_to_base = abs_fp.relative_to(BASE)   # e.g. src/mathops.py
+    except ValueError:
+        # If it's not under BASE (shouldn't happen on runner), fallback to name
+        rel_to_base = Path(abs_fp.name)
+
+    mod = rel_to_base.with_suffix('').as_posix().replace('/', '.')  # e.g. src.mathops
+    if not mod.startswith("src."):
+        mod = f"src.{mod}"
+    return mod
 
 # === Detect changed Python files ===
 def get_changed_files():
@@ -36,11 +56,21 @@ def get_changed_files():
             ["git", "diff", "--name-only", f"{base}...HEAD"],
             capture_output=True, text=True
         ).stdout.strip()
-        files = [Path(line) for line in diff_output.splitlines() if line.endswith(".py")]
+        files = [BASE / Path(line) for line in diff_output.splitlines() if line.endswith(".py")]
 
-    files = [f for f in files if f.exists() and "tests" not in str(f) and str(f).startswith("src/")]
+    files = [f for f in files if f.exists() and "tests" not in str(f) and f.resolve().is_file() and str(f).startswith(str(SRC))]
     print(f"📂 Changed files detected: {files}")
     return files
+
+# === Find a unique test filename (test_<stem>.py, test_<stem>_1.py, ...) ===
+def get_next_test_filename(stem: str) -> Path:
+    base_name = f"test_{stem}.py"
+    file_path = TESTS / base_name
+    counter = 1
+    while file_path.exists():
+        file_path = TESTS / f"test_{stem}_{counter}.py"
+        counter += 1
+    return file_path
 
 # === Generate tests with GitHub Copilot ===
 def generate_tests_with_copilot(file_path: Path):
@@ -67,20 +97,24 @@ def generate_tests_with_copilot(file_path: Path):
     # --- Run Copilot CLI ---
     result = sh(cmd, capture=True)
 
-    # --- Clean up Copilot output ---
+    # --- Clean up Copilot output (strip banners, markdown, non-code) ---
     raw_lines = result.strip().splitlines()
     cleaned_lines = []
 
     for line in raw_lines:
         line_stripped = line.strip()
 
+        # Skip obvious noise
         if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
             continue
         if not line_stripped:
             continue
+
+        # Keep likely Python code
         if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", line_stripped):
             cleaned_lines.append(line_stripped)
             continue
+        # Keep indented/code-block lines and docstrings
         if line_stripped.startswith(("    ", '"""', "'''")):
             cleaned_lines.append(line)
             continue
@@ -88,24 +122,20 @@ def generate_tests_with_copilot(file_path: Path):
     cleaned = "\n".join(cleaned_lines)
     cleaned = cleaned.replace("```python", "").replace("```", "").strip()
 
-    # --- Handle empty or invalid output ---
-    test_file = TESTS / f"test_{file_path.stem}.py"
+    # Create a new unique test file name
+    test_file = get_next_test_filename(file_path.stem)
 
+    # --- Handle empty or no test functions: create a placeholder with correct import path ---
     if not cleaned or "def test_" not in cleaned:
         print("⚠️ Copilot did not generate any usable tests. Creating placeholder test file.")
-        # Detect module import path based on src structure
-        relative_module = file_path.with_suffix('').as_posix().replace('/', '.')
-        if relative_module.startswith("src."):
-            import_line = f"from {relative_module} import *"
-        else:
-            import_line = f"from src.{relative_module} import *"
-
+        mod_path = module_import_path(file_path)
         cleaned = f"""
 import pytest
-{import_line}
+from {mod_path} import *
 
 def test_placeholder():
     # Placeholder test because Copilot output was empty.
+    # Ensures pipeline continuity; replace with real tests later.
     assert True
 """
 
@@ -124,15 +154,6 @@ def run_pytest():
     if res.returncode != 0:
         print(res.stderr, file=sys.stderr)
     return res.returncode == 0
-
-# def run_pytest():
-#     print("🧪 Running pytest validation...")
-#     res = subprocess.run(["pytest", "-q", "--disable-warnings", "--maxfail=1"],
-#                          text=True, capture_output=True)
-#     print(res.stdout)
-#     if res.returncode != 0:
-#         print(res.stderr, file=sys.stderr)
-#     return res.returncode == 0
 
 # === Commit & Push ===
 def git_commit_and_push(files):
@@ -155,9 +176,16 @@ def rollback(files):
 # === Entry Point ===
 if __name__ == "__main__":
     changed = get_changed_files()
+
+    # Fallback: if no changed files, force full scan (useful on first PR)
     if not changed:
-        print("ℹ️ No changed Python files found.")
-        sys.exit(0)
+        print("⚠️ No changed Python files found — forcing full scan of src/.")
+        changed = list(SRC.rglob("*.py"))
+        # Ensure paths are Paths (absolute) and exist
+        changed = [p.resolve() for p in changed if p.exists()]
+        if not changed:
+            print("ℹ️ Still no Python files found under src/. Nothing to do.")
+            sys.exit(0)
 
     generated = []
     for f in changed:
