@@ -70,6 +70,30 @@ jobs:
           echo "🚀 Starting Copilot Test Generator..."
           python .github/scripts/copilot_test_gen.py
 
+
+
+    # 🧾 8️⃣ Post PR Comment Summary
+      - name: Post Copilot Test Summary on PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
+          STATUS="${{ job.status }}"
+          if grep -q "✅ Tests passed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
+            SUMMARY="✅ Copilot test generation succeeded and pytest passed."
+          elif grep -q "⚠️ Copilot did not generate" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
+            SUMMARY="⚠️ Copilot generated placeholder tests (CLI returned no output)."
+          else
+            SUMMARY="❌ Copilot test generation or pytest validation failed."
+          fi
+          BODY="🤖 **Copilot Test Automation Summary**  
+          • Status: **$STATUS**  
+          • Result: $SUMMARY  
+          _Check workflow logs for details._"
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+    
+
       # 🧾 8️⃣ (Optional) Post result summary comment on PR
       # Uncomment below if you want Copilot test summary posted to PR
       #
