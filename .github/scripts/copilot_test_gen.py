@@ -1,4 +1,4 @@
-import subprocess, sys, json
+import subprocess, sys, json, re
 from pathlib import Path
 
 # === Base Paths ===
@@ -23,10 +23,8 @@ def get_changed_files():
     Detects changed Python files between the PR branch (HEAD) and origin/main.
     Works even on shallow clones or brand-new PRs.
     """
-    # Ensure we have 'main' branch reference locally
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
 
-    # Try to find a common base commit
     result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True)
     base = result.stdout.strip()
 
@@ -40,7 +38,6 @@ def get_changed_files():
         ).stdout.strip()
         files = [Path(line) for line in diff_output.splitlines() if line.endswith(".py")]
 
-    # Filter only src/ files (not tests)
     files = [f for f in files if f.exists() and "tests" not in str(f) and str(f).startswith("src/")]
     print(f"📂 Changed files detected: {files}")
     return files
@@ -70,15 +67,26 @@ def generate_tests_with_copilot(file_path: Path):
     # --- Run Copilot CLI ---
     result = sh(cmd, capture=True)
 
-    # --- Clean up markdown fences ---
+    # --- Clean up Copilot output ---
+    raw_lines = result.strip().splitlines()
+    cleaned_lines = []
+
+    for line in raw_lines:
+        # Skip known CLI noise or metadata
+        if re.search(r"deprecation|announcement|copilot cli|deprecated", line, re.IGNORECASE):
+            continue
+        if line.strip().startswith(("-", ">", "#")) and "import" not in line and "def " not in line:
+            continue
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    # Remove Markdown code fences or stray backticks
+    cleaned = cleaned.replace("```python", "").replace("```", "").strip()
+
     test_file = TESTS / f"test_{file_path.stem}.py"
-    cleaned = result.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.replace("```python", "").replace("```", "")
     test_file.write_text(cleaned)
     print(f"✅ Generated {test_file}")
     return test_file
-
 
 # === Run pytest to validate generated tests ===
 def run_pytest():
