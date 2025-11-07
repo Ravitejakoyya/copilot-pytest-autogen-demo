@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
       # 🗂️ 2️⃣ Ensure directory structure exists
       - name: Ensure folder structure

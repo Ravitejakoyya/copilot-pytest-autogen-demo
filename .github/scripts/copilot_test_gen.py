@@ -138,9 +138,14 @@ def rollback(files):
 
 if __name__ == "__main__":
     changed = get_changed_files()
+
+    # 🧩 Fallback: if no changed files detected, force full scan of src/
     if not changed:
-        print("ℹ️ No changed Python files found.")
-        sys.exit(0)
+        print("⚠️ No changed Python files found — forcing full scan of src/.")
+        changed = list(SRC.rglob("*.py"))
+        if not changed:
+            print("ℹ️ Still no Python files found under src/. Nothing to do.")
+            sys.exit(0)
 
     generated = []
     for f in changed:
