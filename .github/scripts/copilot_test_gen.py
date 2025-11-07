@@ -50,20 +50,32 @@ def generate_tests_with_copilot(file_path: Path):
     prompt = f"Write runnable pytest test cases for {file_path}. Output only Python code."
     print(f"🧠 Asking Copilot for tests for: {file_path}")
 
-    # Detect which flag Copilot CLI supports (--prompt or -p)
+    # --- Detect which CLI flag format works ---
+    flag = None
     version_check = subprocess.run(
-        ["gh", "copilot", "suggest", "--help"], capture_output=True, text=True
+        ["gh", "copilot", "suggest", "--help"],
+        capture_output=True, text=True
     )
-    if "--prompt" in version_check.stdout:
+    help_text = version_check.stdout.lower()
+
+    if "--prompt" in help_text:
         flag = "--prompt"
-    else:
+    elif "-p" in help_text:
         flag = "-p"
-    print(f"🔍 Detected Copilot CLI prompt flag: {flag}")
+    else:
+        flag = None
 
-    # Run the copilot suggestion command safely
-    result = sh(f'gh copilot suggest {flag} {json.dumps(prompt)} --limit 1', capture=True)
+    if flag:
+        print(f"🔍 Detected Copilot CLI prompt flag: {flag}")
+        cmd = f'gh copilot suggest {flag} {json.dumps(prompt)} --limit 1'
+    else:
+        print("⚠️ No prompt flag supported; falling back to plain input mode.")
+        cmd = f'gh copilot suggest "{prompt}" --limit 1'
 
-    # Clean up markdown formatting if Copilot returns code fences
+    # --- Run Copilot CLI safely ---
+    result = sh(cmd, capture=True)
+
+    # --- Clean up Copilot output (strip code fences, etc.) ---
     test_file = TESTS / f"test_{file_path.stem}.py"
     cleaned = result.strip()
     if cleaned.startswith("```"):
