@@ -8,7 +8,7 @@ SRC = BASE / "src"
 TESTS = BASE / "tests"
 TESTS.mkdir(exist_ok=True)
 
-# === Utility to run shell commands ===
+# === Run shell commands ===
 def sh(cmd, capture=False, check=True):
     print(f"$ {cmd}")
     result = subprocess.run(cmd, shell=True, text=True, capture_output=capture)
@@ -18,13 +18,10 @@ def sh(cmd, capture=False, check=True):
         sys.exit(result.returncode)
     return result.stdout if capture else ""
 
-# === Normalize a src/*.py path to an importable module path ===
+# === Normalize src path to importable module ===
 def module_import_path(file_path: Path) -> str:
     abs_fp = file_path.resolve()
-    try:
-        rel_to_base = abs_fp.relative_to(BASE)
-    except ValueError:
-        rel_to_base = Path(abs_fp.name)
+    rel_to_base = abs_fp.relative_to(BASE)
     mod = rel_to_base.with_suffix('').as_posix().replace('/', '.')
     if not mod.startswith("src."):
         mod = f"src.{mod}"
@@ -33,48 +30,32 @@ def module_import_path(file_path: Path) -> str:
 # === Detect changed Python files ===
 def get_changed_files():
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
-    result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True)
-    base = result.stdout.strip()
+    base = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True).stdout.strip()
 
     if not base:
-        print("⚠️ No merge base found — assuming first PR. Scanning all files in src/.")
+        print("⚠️ No merge base found — scanning all src/ files.")
         files = list(SRC.rglob("*.py"))
     else:
-        diff_output = subprocess.run(
-            ["git", "diff", "--name-only", f"{base}...HEAD"],
-            capture_output=True, text=True
-        ).stdout.strip()
-        files = [BASE / Path(line) for line in diff_output.splitlines() if line.endswith(".py")]
+        diff = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD"], capture_output=True, text=True).stdout.strip()
+        files = [BASE / Path(line) for line in diff.splitlines() if line.endswith(".py")]
 
-    files = [f for f in files if f.exists() and "tests" not in str(f) and f.resolve().is_file() and str(f).startswith(str(SRC))]
+    files = [f for f in files if f.exists() and "tests" not in str(f) and f.is_file() and str(f).startswith(str(SRC))]
     print(f"📂 Changed files detected: {files}")
     return files
 
-# === Find unique test filenames ===
-def get_next_test_filename(stem: str) -> Path:
-    base_name = f"test_{stem}.py"
-    file_path = TESTS / base_name
-    counter = 1
-    while file_path.exists():
-        file_path = TESTS / f"test_{stem}_{counter}.py"
-        counter += 1
-    return file_path
+# === Find unique test filename ===
+def get_test_file_for_module(stem: str) -> Path:
+    """Always overwrite one canonical test file per module"""
+    return TESTS / f"test_{stem}.py"
 
-# === Coverage analysis ===
+# === Coverage gap detector ===
 def find_uncovered_functions(module_name: str):
-    """
-    Analyze coverage data to find functions that have untested lines.
-    Returns a list of uncovered function names.
-    """
-    cov = coverage.Coverage(data_file='.coverage')
     try:
+        cov = coverage.Coverage(data_file='.coverage')
         cov.load()
-    except Exception as e:
-        print(f"⚠️ No coverage data found: {e}")
+    except Exception:
+        print("⚠️ No coverage data found — skipping coverage gap check.")
         return []
-
-    analyzed_files = cov.get_data().measured_files()
-    missed_funcs = []
 
     try:
         module = importlib.import_module(module_name)
@@ -82,108 +63,87 @@ def find_uncovered_functions(module_name: str):
         print(f"⚠️ Could not import {module_name}: {e}")
         return []
 
+    missed = []
+    analyzed = cov.get_data().measured_files()
     for name, func in inspect.getmembers(module, inspect.isfunction):
         func_file = inspect.getsourcefile(func)
-        if func_file in analyzed_files:
-            _, _, _, missing_lines = cov.analysis(func_file)
-            if missing_lines:
-                missed_funcs.append(name)
+        if func_file in analyzed:
+            _, _, _, missing = cov.analysis(func_file)
+            if missing:
+                missed.append(name)
+    return missed
 
-    return missed_funcs
-
-# === Generate tests with GitHub Copilot ===
+# === Ask Copilot for tests ===
 def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
     if specific_function:
         prompt = (
-            f"You are a senior QA engineer. Write pytest test cases only for the function '{specific_function}' "
-            f"in the module {file_path}. Include edge cases, exception handling, and normal scenarios. "
-            f"Output only Python code."
+            f"Write pytest tests ONLY for the function '{specific_function}' in {file_path}. "
+            f"Ensure edge cases, invalid inputs, and boundary conditions are covered. "
+            f"Output valid Python code only."
         )
     else:
         prompt = (
-            f"You are a senior Python QA engineer. Write complete pytest test cases "
-            f"for all functions in the module {file_path}. "
-            f"Include edge cases, exception handling, and normal scenarios. "
-            f"Do not include explanations or markdown formatting. Output only Python code."
+            f"Write runnable pytest test cases covering EVERY function in {file_path}. "
+            f"Include success, failure, and edge-case scenarios. Output Python code only."
         )
 
     print(f"🧠 Asking Copilot for tests for: {file_path}")
 
-    version_check = subprocess.run(
-        ["gh", "copilot", "suggest", "--help"],
-        capture_output=True, text=True
-    )
+    version_check = subprocess.run(["gh", "copilot", "suggest", "--help"], capture_output=True, text=True)
     help_text = version_check.stdout.lower()
-
     if "--prompt" in help_text:
         cmd = f'gh copilot suggest --prompt {json.dumps(prompt)}'
-        print("🔍 Using --prompt flag.")
     elif "-p" in help_text:
         cmd = f'gh copilot suggest -p {json.dumps(prompt)}'
-        print("🔍 Using -p flag.")
     else:
         cmd = f'gh copilot suggest "{prompt}"'
-        print("⚠️ Using legacy Copilot CLI (no flags or limits).")
 
     result = sh(cmd, capture=True)
-    raw_lines = result.strip().splitlines()
-    cleaned_lines = []
-
-    for line in raw_lines:
-        line_stripped = line.strip()
-        if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
+    lines = []
+    for line in result.splitlines():
+        l = line.strip()
+        if not l or "copilot" in l.lower() or "visit" in l.lower():
             continue
-        if not line_stripped:
+        if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", l):
+            lines.append(line)
             continue
-        if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", line_stripped):
-            cleaned_lines.append(line_stripped)
-            continue
-        if line_stripped.startswith(("    ", '"""', "'''")):
-            cleaned_lines.append(line)
-            continue
+        if l.startswith(("    ", '"""', "'''")):
+            lines.append(line)
+    cleaned = "\n".join(lines).replace("```python", "").replace("```", "").strip()
 
-    cleaned = "\n".join(cleaned_lines)
-    cleaned = cleaned.replace("```python", "").replace("```", "").strip()
+    mod_path = module_import_path(file_path)
+    test_file = get_test_file_for_module(file_path.stem)
 
-    test_file = get_next_test_filename(file_path.stem)
-
+    # Avoid committing placeholder again
     if not cleaned or "def test_" not in cleaned:
-        print("⚠️ Copilot did not generate any usable tests. Creating placeholder test file.")
-        mod_path = module_import_path(file_path)
-        cleaned = f"""
-import pytest
-from {mod_path} import *
+        print(f"⚠️ Copilot returned no tests for {file_path.name}. Skipping placeholder regeneration.")
+        return None
 
-def test_placeholder():
-    # Placeholder test because Copilot output was empty.
-    # Ensures pipeline continuity; replace with real tests later.
-    assert True
-"""
+    # Fix imports if missing
+    if "import pytest" not in cleaned:
+        cleaned = f"import pytest\nfrom {mod_path} import *\n\n{cleaned}"
 
     test_file.write_text(cleaned.strip() + "\n")
-    print(f"✅ Generated test file: {test_file}")
+    print(f"✅ Generated tests for {file_path.name} → {test_file}")
     return test_file
 
 # === Run pytest ===
 def run_pytest():
     print("🧪 Running pytest validation with coverage...")
     res = subprocess.run(
-        ["pytest", "-q", "--disable-warnings", "--maxfail=1", "--cov=src", "--cov-report=term", "--cov-report=xml"],
+        ["pytest", "-q", "--disable-warnings", "--maxfail=1", "--cov=src", "--cov-report=term"],
         text=True, capture_output=True
     )
     print(res.stdout)
-    if "collected 0 items" in res.stdout:
-        print("⚠️ No tests collected — fallback logic may have run.")
-    if res.returncode != 0:
-        print(res.stderr, file=sys.stderr)
     return res.returncode == 0
 
-# === Commit & Push ===
+# === Git commit ===
 def git_commit_and_push(files):
     sh('git config user.name "ci-bot"')
     sh('git config user.email "ci-bot@users.noreply.github.com"')
     for f in files:
-        sh(f"git add {f}")
+        if f and Path(f).exists():
+            sh(f"git add {f}")
     sh('git commit -m "auto: add pytest files generated by Copilot" || true', check=False)
     sh('git push', check=False)
     print("🚀 Committed and pushed generated tests.")
@@ -191,40 +151,41 @@ def git_commit_and_push(files):
 # === Rollback ===
 def rollback(files):
     for f in files:
-        if f.exists():
-            f.unlink()
+        if f and Path(f).exists():
+            Path(f).unlink()
             print(f"🧹 Removed {f}")
-    print("🧹 Rolled back generated test files.")
+    print("🧹 Rollback done.")
 
-# === Entry Point ===
+# === Main ===
 if __name__ == "__main__":
     changed = get_changed_files()
-
     if not changed:
-        print("⚠️ No changed Python files found — forcing full scan of src/.")
+        print("⚠️ No changed Python files found — forcing full src scan.")
         changed = list(SRC.rglob("*.py"))
-        changed = [p.resolve() for p in changed if p.exists()]
         if not changed:
-            print("ℹ️ Still no Python files found under src/. Nothing to do.")
+            print("ℹ️ No src files found. Exiting.")
             sys.exit(0)
 
     generated = []
     for f in changed:
-        generated.append(generate_tests_with_copilot(f))
+        file = generate_tests_with_copilot(f)
+        if file:
+            generated.append(file)
 
     if run_pytest():
-        print("✅ Initial tests passed! Checking coverage gaps...")
+        print("✅ Initial tests passed — checking uncovered functions...")
         for f in changed:
-            mod_name = module_import_path(f)
-            uncovered = find_uncovered_functions(mod_name)
+            mod = module_import_path(f)
+            uncovered = find_uncovered_functions(mod)
             if uncovered:
-                print(f"⚠️ Functions missing coverage in {mod_name}: {uncovered}")
+                print(f"⚠️ Missing coverage in {mod}: {uncovered}")
                 for func in uncovered:
-                    print(f"🧠 Re-asking Copilot for missing function: {func}")
-                    generated.append(generate_tests_with_copilot(f, func))
-        print("🚀 Finalizing and committing all tests.")
+                    newfile = generate_tests_with_copilot(f, func)
+                    if newfile:
+                        generated.append(newfile)
+        print("🚀 Committing improved tests.")
         git_commit_and_push(generated)
     else:
-        print("❌ Tests failed. Cleaning up generated test files.")
+        print("❌ Tests failed — cleaning up generated files.")
         rollback(generated)
         sys.exit(1)
