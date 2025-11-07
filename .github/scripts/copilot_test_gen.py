@@ -1,5 +1,6 @@
 import subprocess, sys
 from pathlib import Path
+import json
 
 BASE = Path(".").resolve()
 SRC = BASE / "src"
@@ -46,7 +47,7 @@ def get_changed_files():
 def generate_tests_with_copilot(file_path: Path):
     prompt = f"Write runnable pytest tests for {file_path}. Output only Python code."
     print(f"🧠 Asking Copilot for tests for: {file_path}")
-    result = sh(f"gh copilot suggest -t {prompt} --limit 1", capture=True)
+    result = sh(f"gh copilot suggest --prompt {json.dumps(prompt)} --limit 1", capture=True)
     test_file = TESTS / f"test_{file_path.stem}.py"
     cleaned = result.strip()
     if cleaned.startswith("```"):
@@ -117,7 +118,7 @@ def get_changed_files():
 def generate_tests_with_copilot(file_path: Path):
     prompt = f"Write complete pytest test cases for {file_path}. Output only Python code."
     print(f"🧠 Asking Copilot for tests for {file_path}")
-    result = sh(f"gh copilot suggest -t {prompt} --limit 1", capture=True)
+    result = sh(f"gh copilot suggest --prompt {json.dumps(prompt)} --limit 1", capture=True)
     test_path = TESTS / f"test_{file_path.stem}.py"
     test_path.write_text(result)
     print(f"✅ Generated: {test_path}")
