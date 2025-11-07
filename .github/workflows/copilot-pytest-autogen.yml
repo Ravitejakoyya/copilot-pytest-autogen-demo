@@ -21,6 +21,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout full repo history (for diff)
+        uses: actions/checkout@v4
+        with:
+            fetch-depth: 0
+
       - name: Ensure folder structure
         run: mkdir -p src tests .github/scripts
 
@@ -39,8 +44,15 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pytest pytest-cov
 
-      - name: Run Copilot test generator
+      # 🧠 6️⃣ Copilot-based test generator script is committed in the repo
+      - name: Ensure generator script is present
+        run: |
+          ls -l .github/scripts/copilot_test_gen.py || echo "Generator script missing; ensure .github/scripts/copilot_test_gen.py is committed"
+
+      # ⚡ 7️⃣ Run the Copilot Test Generator (generate → validate → commit)
+      - name: Run Copilot Test Generator
         run: |
           python .github/scripts/copilot_test_gen.py
