@@ -74,7 +74,6 @@ def generate_tests_with_copilot(file_path: Path):
     for line in raw_lines:
         line_stripped = line.strip()
 
-        # Skip non-code text
         if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
             continue
         if not line_stripped:
@@ -94,20 +93,25 @@ def generate_tests_with_copilot(file_path: Path):
 
     if not cleaned or "def test_" not in cleaned:
         print("⚠️ Copilot did not generate any usable tests. Creating placeholder test file.")
+        # Detect module import path based on src structure
+        relative_module = file_path.with_suffix('').as_posix().replace('/', '.')
+        if relative_module.startswith("src."):
+            import_line = f"from {relative_module} import *"
+        else:
+            import_line = f"from src.{relative_module} import *"
+
         cleaned = f"""
 import pytest
-from {file_path.stem} import *
+{import_line}
 
 def test_placeholder():
     # Placeholder test because Copilot output was empty.
-    # This ensures the CI pipeline passes until Copilot CLI is upgraded.
     assert True
 """
 
     test_file.write_text(cleaned.strip() + "\n")
     print(f"✅ Generated test file: {test_file}")
     return test_file
-
 
 # === Run pytest to validate generated tests ===
 def run_pytest():
