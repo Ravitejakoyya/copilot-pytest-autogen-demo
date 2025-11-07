@@ -1,13 +1,11 @@
 import subprocess, sys, json, re
 from pathlib import Path
 
-# === Base Paths ===
 BASE = Path(".").resolve()
 SRC = BASE / "src"
 TESTS = BASE / "tests"
 TESTS.mkdir(exist_ok=True)
 
-# === Utility to run shell commands ===
 def sh(cmd, capture=False, check=True):
     print(f"$ {cmd}")
     result = subprocess.run(cmd, shell=True, text=True, capture_output=capture)
@@ -17,14 +15,8 @@ def sh(cmd, capture=False, check=True):
         sys.exit(result.returncode)
     return result.stdout if capture else ""
 
-# === Detect changed Python files ===
 def get_changed_files():
-    """
-    Detects changed Python files between the PR branch (HEAD) and origin/main.
-    Works even on shallow clones or brand-new PRs.
-    """
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
-
     result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True)
     base = result.stdout.strip()
 
@@ -42,16 +34,24 @@ def get_changed_files():
     print(f"📂 Changed files detected: {files}")
     return files
 
-# === Generate tests with GitHub Copilot ===
+def get_next_test_filename(stem: str) -> Path:
+    """
+    If tests/test_<stem>.py exists, generate tests/test_<stem>_1.py,
+    tests/test_<stem>_2.py, etc.
+    """
+    base_name = f"test_{stem}.py"
+    file_path = TESTS / base_name
+    counter = 1
+    while file_path.exists():
+        file_path = TESTS / f"test_{stem}_{counter}.py"
+        counter += 1
+    return file_path
+
 def generate_tests_with_copilot(file_path: Path):
     prompt = f"Write runnable pytest test cases for {file_path}. Output only Python code."
     print(f"🧠 Asking Copilot for tests for: {file_path}")
 
-    # --- Detect available flags ---
-    version_check = subprocess.run(
-        ["gh", "copilot", "suggest", "--help"],
-        capture_output=True, text=True
-    )
+    version_check = subprocess.run(["gh", "copilot", "suggest", "--help"], capture_output=True, text=True)
     help_text = version_check.stdout.lower()
 
     if "--prompt" in help_text:
@@ -64,16 +64,13 @@ def generate_tests_with_copilot(file_path: Path):
         cmd = f'gh copilot suggest "{prompt}"'
         print("⚠️ Using legacy Copilot CLI (no flags or limits).")
 
-    # --- Run Copilot CLI ---
     result = sh(cmd, capture=True)
 
-    # --- Clean up Copilot output ---
     raw_lines = result.strip().splitlines()
     cleaned_lines = []
 
     for line in raw_lines:
         line_stripped = line.strip()
-
         if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
             continue
         if not line_stripped:
@@ -88,12 +85,11 @@ def generate_tests_with_copilot(file_path: Path):
     cleaned = "\n".join(cleaned_lines)
     cleaned = cleaned.replace("```python", "").replace("```", "").strip()
 
-    # --- Handle empty or invalid output ---
-    test_file = TESTS / f"test_{file_path.stem}.py"
+    # Create a new unique test file name
+    test_file = get_next_test_filename(file_path.stem)
 
     if not cleaned or "def test_" not in cleaned:
         print("⚠️ Copilot did not generate any usable tests. Creating placeholder test file.")
-        # Detect module import path based on src structure
         relative_module = file_path.with_suffix('').as_posix().replace('/', '.')
         if relative_module.startswith("src."):
             import_line = f"from {relative_module} import *"
@@ -113,7 +109,6 @@ def test_placeholder():
     print(f"✅ Generated test file: {test_file}")
     return test_file
 
-# === Run pytest to validate generated tests ===
 def run_pytest():
     print("🧪 Running pytest validation...")
     res = subprocess.run(["pytest", "-q", "--disable-warnings", "--maxfail=1"],
@@ -125,16 +120,6 @@ def run_pytest():
         print(res.stderr, file=sys.stderr)
     return res.returncode == 0
 
-# def run_pytest():
-#     print("🧪 Running pytest validation...")
-#     res = subprocess.run(["pytest", "-q", "--disable-warnings", "--maxfail=1"],
-#                          text=True, capture_output=True)
-#     print(res.stdout)
-#     if res.returncode != 0:
-#         print(res.stderr, file=sys.stderr)
-#     return res.returncode == 0
-
-# === Commit & Push ===
 def git_commit_and_push(files):
     sh('git config user.name "ci-bot"')
     sh('git config user.email "ci-bot@users.noreply.github.com"')
@@ -144,7 +129,6 @@ def git_commit_and_push(files):
     sh('git push', check=False)
     print("🚀 Committed and pushed generated tests.")
 
-# === Rollback generated tests if validation fails ===
 def rollback(files):
     for f in files:
         if f.exists():
@@ -152,7 +136,6 @@ def rollback(files):
             print(f"🧹 Removed {f}")
     print("🧹 Rolled back generated test files.")
 
-# === Entry Point ===
 if __name__ == "__main__":
     changed = get_changed_files()
     if not changed:
