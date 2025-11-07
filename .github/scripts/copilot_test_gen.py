@@ -50,10 +50,20 @@ def generate_tests_with_copilot(file_path: Path):
     prompt = f"Write runnable pytest test cases for {file_path}. Output only Python code."
     print(f"🧠 Asking Copilot for tests for: {file_path}")
 
-    # ✅ Correct flag for Copilot CLI
-    result = sh(f"gh copilot suggest --prompt {json.dumps(prompt)} --limit 1", capture=True)
+    # Detect which flag Copilot CLI supports (--prompt or -p)
+    version_check = subprocess.run(
+        ["gh", "copilot", "suggest", "--help"], capture_output=True, text=True
+    )
+    if "--prompt" in version_check.stdout:
+        flag = "--prompt"
+    else:
+        flag = "-p"
+    print(f"🔍 Detected Copilot CLI prompt flag: {flag}")
 
-    # Clean up and save
+    # Run the copilot suggestion command safely
+    result = sh(f'gh copilot suggest {flag} {json.dumps(prompt)} --limit 1', capture=True)
+
+    # Clean up markdown formatting if Copilot returns code fences
     test_file = TESTS / f"test_{file_path.stem}.py"
     cleaned = result.strip()
     if cleaned.startswith("```"):
@@ -61,6 +71,7 @@ def generate_tests_with_copilot(file_path: Path):
     test_file.write_text(cleaned)
     print(f"✅ Generated {test_file}")
     return test_file
+
 
 # === Run pytest to validate generated tests ===
 def run_pytest():
