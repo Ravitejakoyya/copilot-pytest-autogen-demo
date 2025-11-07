@@ -1,5 +1,6 @@
-import subprocess, sys, json, re, os
+import subprocess, sys, json, re, os, inspect, importlib
 from pathlib import Path
+import coverage
 
 # === Base Paths ===
 BASE = Path(".").resolve()
@@ -19,32 +20,19 @@ def sh(cmd, capture=False, check=True):
 
 # === Normalize a src/*.py path to an importable module path ===
 def module_import_path(file_path: Path) -> str:
-    """
-    Convert a file path (absolute or relative) into a dotted module path under src/.
-    Examples:
-      /repo/src/mathops.py -> src.mathops
-      src/pkg/util.py      -> src.pkg.util
-    """
     abs_fp = file_path.resolve()
     try:
-        rel_to_base = abs_fp.relative_to(BASE)   # e.g. src/mathops.py
+        rel_to_base = abs_fp.relative_to(BASE)
     except ValueError:
-        # If it's not under BASE (shouldn't happen on runner), fallback to name
         rel_to_base = Path(abs_fp.name)
-
-    mod = rel_to_base.with_suffix('').as_posix().replace('/', '.')  # e.g. src.mathops
+    mod = rel_to_base.with_suffix('').as_posix().replace('/', '.')
     if not mod.startswith("src."):
         mod = f"src.{mod}"
     return mod
 
 # === Detect changed Python files ===
 def get_changed_files():
-    """
-    Detects changed Python files between the PR branch (HEAD) and origin/main.
-    Works even on shallow clones or brand-new PRs.
-    """
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
-
     result = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True)
     base = result.stdout.strip()
 
@@ -62,7 +50,7 @@ def get_changed_files():
     print(f"📂 Changed files detected: {files}")
     return files
 
-# === Find a unique test filename (test_<stem>.py, test_<stem>_1.py, ...) ===
+# === Find unique test filenames ===
 def get_next_test_filename(stem: str) -> Path:
     base_name = f"test_{stem}.py"
     file_path = TESTS / base_name
@@ -72,12 +60,55 @@ def get_next_test_filename(stem: str) -> Path:
         counter += 1
     return file_path
 
+# === Coverage analysis ===
+def find_uncovered_functions(module_name: str):
+    """
+    Analyze coverage data to find functions that have untested lines.
+    Returns a list of uncovered function names.
+    """
+    cov = coverage.Coverage(data_file='.coverage')
+    try:
+        cov.load()
+    except Exception as e:
+        print(f"⚠️ No coverage data found: {e}")
+        return []
+
+    analyzed_files = cov.get_data().measured_files()
+    missed_funcs = []
+
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as e:
+        print(f"⚠️ Could not import {module_name}: {e}")
+        return []
+
+    for name, func in inspect.getmembers(module, inspect.isfunction):
+        func_file = inspect.getsourcefile(func)
+        if func_file in analyzed_files:
+            _, _, _, missing_lines = cov.analysis(func_file)
+            if missing_lines:
+                missed_funcs.append(name)
+
+    return missed_funcs
+
 # === Generate tests with GitHub Copilot ===
-def generate_tests_with_copilot(file_path: Path):
-    prompt = f"Write runnable pytest test cases for {file_path}. Output only Python code."
+def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
+    if specific_function:
+        prompt = (
+            f"You are a senior QA engineer. Write pytest test cases only for the function '{specific_function}' "
+            f"in the module {file_path}. Include edge cases, exception handling, and normal scenarios. "
+            f"Output only Python code."
+        )
+    else:
+        prompt = (
+            f"You are a senior Python QA engineer. Write complete pytest test cases "
+            f"for all functions in the module {file_path}. "
+            f"Include edge cases, exception handling, and normal scenarios. "
+            f"Do not include explanations or markdown formatting. Output only Python code."
+        )
+
     print(f"🧠 Asking Copilot for tests for: {file_path}")
 
-    # --- Detect available flags ---
     version_check = subprocess.run(
         ["gh", "copilot", "suggest", "--help"],
         capture_output=True, text=True
@@ -94,27 +125,19 @@ def generate_tests_with_copilot(file_path: Path):
         cmd = f'gh copilot suggest "{prompt}"'
         print("⚠️ Using legacy Copilot CLI (no flags or limits).")
 
-    # --- Run Copilot CLI ---
     result = sh(cmd, capture=True)
-
-    # --- Clean up Copilot output (strip banners, markdown, non-code) ---
     raw_lines = result.strip().splitlines()
     cleaned_lines = []
 
     for line in raw_lines:
         line_stripped = line.strip()
-
-        # Skip obvious noise
         if re.search(r"(deprecation|announcement|copilot|visit|information|http|github\.com)", line_stripped, re.IGNORECASE):
             continue
         if not line_stripped:
             continue
-
-        # Keep likely Python code
         if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", line_stripped):
             cleaned_lines.append(line_stripped)
             continue
-        # Keep indented/code-block lines and docstrings
         if line_stripped.startswith(("    ", '"""', "'''")):
             cleaned_lines.append(line)
             continue
@@ -122,10 +145,8 @@ def generate_tests_with_copilot(file_path: Path):
     cleaned = "\n".join(cleaned_lines)
     cleaned = cleaned.replace("```python", "").replace("```", "").strip()
 
-    # Create a new unique test file name
     test_file = get_next_test_filename(file_path.stem)
 
-    # --- Handle empty or no test functions: create a placeholder with correct import path ---
     if not cleaned or "def test_" not in cleaned:
         print("⚠️ Copilot did not generate any usable tests. Creating placeholder test file.")
         mod_path = module_import_path(file_path)
@@ -143,11 +164,13 @@ def test_placeholder():
     print(f"✅ Generated test file: {test_file}")
     return test_file
 
-# === Run pytest to validate generated tests ===
+# === Run pytest ===
 def run_pytest():
-    print("🧪 Running pytest validation...")
-    res = subprocess.run(["pytest", "-q", "--disable-warnings", "--maxfail=1"],
-                         text=True, capture_output=True)
+    print("🧪 Running pytest validation with coverage...")
+    res = subprocess.run(
+        ["pytest", "-q", "--disable-warnings", "--maxfail=1", "--cov=src", "--cov-report=term", "--cov-report=xml"],
+        text=True, capture_output=True
+    )
     print(res.stdout)
     if "collected 0 items" in res.stdout:
         print("⚠️ No tests collected — fallback logic may have run.")
@@ -165,7 +188,7 @@ def git_commit_and_push(files):
     sh('git push', check=False)
     print("🚀 Committed and pushed generated tests.")
 
-# === Rollback generated tests if validation fails ===
+# === Rollback ===
 def rollback(files):
     for f in files:
         if f.exists():
@@ -177,11 +200,9 @@ def rollback(files):
 if __name__ == "__main__":
     changed = get_changed_files()
 
-    # Fallback: if no changed files, force full scan (useful on first PR)
     if not changed:
         print("⚠️ No changed Python files found — forcing full scan of src/.")
         changed = list(SRC.rglob("*.py"))
-        # Ensure paths are Paths (absolute) and exist
         changed = [p.resolve() for p in changed if p.exists()]
         if not changed:
             print("ℹ️ Still no Python files found under src/. Nothing to do.")
@@ -192,7 +213,16 @@ if __name__ == "__main__":
         generated.append(generate_tests_with_copilot(f))
 
     if run_pytest():
-        print("✅ Tests passed! Committing and pushing.")
+        print("✅ Initial tests passed! Checking coverage gaps...")
+        for f in changed:
+            mod_name = module_import_path(f)
+            uncovered = find_uncovered_functions(mod_name)
+            if uncovered:
+                print(f"⚠️ Functions missing coverage in {mod_name}: {uncovered}")
+                for func in uncovered:
+                    print(f"🧠 Re-asking Copilot for missing function: {func}")
+                    generated.append(generate_tests_with_copilot(f, func))
+        print("🚀 Finalizing and committing all tests.")
         git_commit_and_push(generated)
     else:
         print("❌ Tests failed. Cleaning up generated test files.")
