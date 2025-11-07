@@ -32,16 +32,16 @@ jobs:
           echo "📂 Directory structure ready"
 
       # 🤖 3️⃣ Install GitHub CLI and Copilot extension
-      - name: Install GitHub CLI and Copilot
+      - name: Install GitHub CLI and Copilot extension
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-          gh extension install github/gh-copilot
-          echo "✅ Copilot CLI installed successfully."
-          gh --version
-          echo "🔑 Authenticating Copilot CLI..."
-          gh auth status || gh auth login --with-token <<< "${GITHUB_TOKEN}"
-          echo "🔐 Copilot CLI authenticated."
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+            gh extension remove github/gh-copilot || true
+            gh extension install github/gh-copilot@latest
+            gh extension upgrade github/gh-copilot
+            gh --version
+            echo "✅ Copilot CLI (latest) installed"
+
 
       # 🐍 4️⃣ Set up Python
       - name: Set up Python
