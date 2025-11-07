@@ -67,10 +67,15 @@ jobs:
       # ⚡ 7️⃣ Run Copilot-based test generation
       - name: Run Copilot Test Generator
         run: |
-          echo "🚀 Starting Copilot Test Generator..."
-          python .github/scripts/copilot_test_gen.py | tee pytest_output.log
+            # Run generator + tests, keep pytest output for comment parsing
+            python .github/scripts/copilot_test_gen.py
+            echo "📊 Running pytest with coverage..."
+            pytest -q --disable-warnings --maxfail=1 \
+            --cov=src --cov-report=term --cov-report=xml \
+            | tee pytest_output.log
 
-    # 🧾 8️⃣ Post PR Comment Summary (with test counts)
+
+      # 🧾 8️⃣ Post PR Comment Summary (with test counts + coverage)
       - name: Post Copilot Test Summary on PR
         if: always()
         env:
@@ -78,37 +83,42 @@ jobs:
         run: |
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           STATUS="${{ job.status }}"
-          echo "🔍 Detecting test summary..."
+          echo "🔍 Collecting pytest results..."
 
-          # Initialize variables
           TESTS_PASSED=0
           TESTS_FAILED=0
           PLACEHOLDER_COUNT=0
+          COVERAGE="N/A"
 
-          # Parse pytest summary lines from logs (if pytest ran)
-          if [ -f "${GITHUB_WORKSPACE}/pytest_output.log" ]; then
-            if grep -q "failed" "${GITHUB_WORKSPACE}/pytest_output.log"; then
-              TESTS_FAILED=$(grep -Eo "[0-9]+ failed" "${GITHUB_WORKSPACE}/pytest_output.log" | awk '{print $1}' | tail -n1)
-            fi
-            if grep -q "passed" "${GITHUB_WORKSPACE}/pytest_output.log"; then
-              TESTS_PASSED=$(grep -Eo "[0-9]+ passed" "${GITHUB_WORKSPACE}/pytest_output.log" | awk '{print $1}' | tail -n1)
+          # --- Parse pytest summary if present ---
+          if [ -f pytest_output.log ]; then
+            TESTS_PASSED=$(grep -Eo "[0-9]+ passed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
+            TESTS_FAILED=$(grep -Eo "[0-9]+ failed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
+            COVERAGE_LINE=$(grep -E "TOTAL\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+%" pytest_output.log | tail -n1)
+            if [ -n "$COVERAGE_LINE" ]; then
+              COVERAGE=$(echo "$COVERAGE_LINE" | grep -Eo "[0-9]+%$" | tr -d '%')
             fi
           fi
 
-          # Check for placeholder tests
-          PLACEHOLDER_COUNT=$(grep -R "test_placeholder" tests/ | wc -l || echo 0)
+          # --- Count placeholder tests ---
+          PLACEHOLDER_COUNT=$(grep -R "test_placeholder" tests/ 2>/dev/null | wc -l || echo 0)
 
-          # Decide result message
+          # --- Build result text ---
           if [ "$STATUS" = "success" ] && [ "$TESTS_FAILED" -eq 0 ]; then
             if [ "$PLACEHOLDER_COUNT" -gt 0 ]; then
-              RESULT="⚠️ $TESTS_PASSED tests passed, 0 failed ($PLACEHOLDER_COUNT placeholder test(s))."
+              RESULT="⚠️ $TESTS_PASSED passed, 0 failed ($PLACEHOLDER_COUNT placeholder)."
             else
-              RESULT="✅ $TESTS_PASSED tests passed, $TESTS_FAILED failed."
+              RESULT="✅ $TESTS_PASSED passed, 0 failed."
             fi
           elif [ "$TESTS_FAILED" -gt 0 ]; then
-            RESULT="❌ $TESTS_FAILED tests failed, $TESTS_PASSED passed."
+            RESULT="❌ $TESTS_FAILED failed, $TESTS_PASSED passed."
           else
             RESULT="❌ Copilot test generation or pytest validation failed."
+          fi
+
+          # --- Append coverage if numeric ---
+          if [ "$COVERAGE" != "N/A" ]; then
+            RESULT="$RESULT Coverage: ${COVERAGE}%."
           fi
 
           BODY="🤖 **Copilot Test Automation Summary**  
@@ -116,11 +126,8 @@ jobs:
           • Result: $RESULT  
           _Check workflow logs for details._"
 
-          echo "🧾 Commenting on PR #$PR_NUMBER"
+          echo "🧾 Posting comment to PR #$PR_NUMBER ..."
           gh pr comment "$PR_NUMBER" --body "$BODY"
-
-
-
 
     # # 🧾 8️⃣ Post PR Comment Summary
     #   - name: Post Copilot Test Summary on PR
