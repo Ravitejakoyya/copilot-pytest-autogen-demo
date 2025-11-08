@@ -187,11 +187,6 @@ In your repository’s settings:
 
 * Go to **Settings → Actions → General**
 * Ensure “Read and write permissions” are **enabled**
-* Add the following secret if using API fallback:
-
-  ```
-  OPENAI_API_KEY = your_openai_api_key
-  ```
 
 ---
 
