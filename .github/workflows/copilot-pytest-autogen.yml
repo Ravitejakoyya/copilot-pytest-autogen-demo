@@ -31,20 +31,25 @@ jobs:
           mkdir -p src tests .github/scripts
           echo "📂 Directory structure ready"
 
-      - name: Install GitHub CLI + Copilot CLI
+    # 🤖 3️⃣ Install GitHub CLI and Copilot CLI
+      - name: Install GitHub CLI and Copilot CLI
         run: |
-            sudo apt-get update -y
-            sudo apt-get install -y jq npm
-            echo "🧩 Installing GitHub Copilot CLI via npm..."
-            
-            # Install global Copilot CLI
-            npm install -g @githubnext/github-copilot-cli
-            
-            # Verify installation and available commands
-            which github-copilot-cli || echo "⚠️ CLI not in PATH!"
-            github-copilot-cli --help || true
-            
-            echo "✅ Copilot CLI installed successfully"
+          sudo apt-get update -y
+          sudo apt-get install -y jq npm
+          echo "🧩 Installing GitHub Copilot CLI via npm..."
+
+          # Install the modern Copilot CLI (2025 version)
+          npm install -g @githubnext/github-copilot-cli
+
+          # Verify CLI installed successfully
+          echo "✅ Verifying Copilot CLI installation..."
+          if ! command -v github-copilot-cli &> /dev/null; then
+            echo "❌ Copilot CLI not found in PATH!"; exit 1;
+          fi
+
+          github-copilot-cli --help | head -20 || true
+          echo "✅ Copilot CLI installation complete"
+
     
 
     #   # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
