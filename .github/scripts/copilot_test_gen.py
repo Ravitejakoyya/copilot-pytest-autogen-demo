@@ -1,21 +1,12 @@
-import subprocess, sys, json, re, os, inspect, importlib, ast
+import subprocess, sys, json, re, os, inspect, importlib, ast, shutil
 from pathlib import Path
 import coverage
 
-# ✅ Optional fallback to OpenAI GPT-4o
-try:
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-except ImportError:
-    client = None
-
-# === Base Paths ===
 BASE = Path(".").resolve()
 SRC = BASE / "src"
 TESTS = BASE / "tests"
 TESTS.mkdir(exist_ok=True)
 
-# === Utility: shell runner ===
 def sh(cmd, capture=False, check=True):
     print(f"$ {cmd}")
     result = subprocess.run(cmd, shell=True, text=True, capture_output=capture)
@@ -25,20 +16,17 @@ def sh(cmd, capture=False, check=True):
         sys.exit(result.returncode)
     return result.stdout if capture else ""
 
-# === Convert src path to importable module path ===
 def module_import_path(file_path: Path) -> str:
     abs_fp = file_path.resolve()
     rel_to_base = abs_fp.relative_to(BASE)
-    mod = rel_to_base.with_suffix("").as_posix().replace("/", ".")
+    mod = rel_to_base.with_suffix('').as_posix().replace('/', '.')
     if not mod.startswith("src."):
         mod = f"src.{mod}"
     return mod
 
-# === Detect changed files ===
 def get_changed_files():
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
     base = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True).stdout.strip()
-
     if not base:
         print("⚠️ No merge base found — scanning all src/ files.")
         files = list(SRC.rglob("*.py"))
@@ -46,16 +34,10 @@ def get_changed_files():
         diff = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD"],
                               capture_output=True, text=True).stdout.strip()
         files = [BASE / Path(line) for line in diff.splitlines() if line.endswith(".py")]
-
     files = [f for f in files if f.exists() and "tests" not in str(f) and f.is_file() and str(f).startswith(str(SRC))]
     print(f"📂 Changed files detected: {files}")
     return files
 
-# === One test file per module ===
-def get_test_file_for_module(stem: str) -> Path:
-    return TESTS / f"test_{stem}.py"
-
-# === Extract all functions from file ===
 def extract_function_names(file_path: Path):
     try:
         tree = ast.parse(file_path.read_text())
@@ -63,97 +45,83 @@ def extract_function_names(file_path: Path):
     except Exception:
         return []
 
-# === Find uncovered functions via coverage ===
-def find_uncovered_functions(module_name: str):
-    try:
-        cov = coverage.Coverage(data_file=".coverage")
-        cov.load()
-    except Exception:
-        print("⚠️ No coverage data found — skipping coverage gap check.")
-        return []
+def get_test_file_for_module(stem: str) -> Path:
+    return TESTS / f"test_{stem}.py"
 
-    try:
-        module = importlib.import_module(module_name)
-    except Exception as e:
-        print(f"⚠️ Could not import {module_name}: {e}")
-        return []
-
-    missed = []
-    analyzed = cov.get_data().measured_files()
-    for name, func in inspect.getmembers(module, inspect.isfunction):
-        func_file = inspect.getsourcefile(func)
-        if func_file in analyzed:
-            _, _, _, missing = cov.analysis(func_file)
-            if missing:
-                missed.append(name)
-    return missed
-
-# === Detect installed Copilot CLI flavor ===
 def detect_copilot_cli():
-    for cmd in [["github-copilot-cli", "--help"], ["gh", "copilot", "--help"]]:
+    """Detect installed Copilot CLI flavor."""
+    for cmd in ["github-copilot-cli", "gh copilot"]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if "suggest" in result.stdout or "generate" in result.stdout:
-                print(f"✅ Detected Copilot CLI: {' '.join(cmd[:-1])}")
-                return cmd[0]
+            result = subprocess.run(cmd.split() + ["--help"], capture_output=True, text=True)
+            if "generate" in result.stdout:
+                print(f"✅ Detected '{cmd}' with 'generate' support.")
+                return cmd, "generate"
+            elif "suggest" in result.stdout:
+                print(f"✅ Detected '{cmd}' with 'suggest' support.")
+                return cmd, "suggest"
         except FileNotFoundError:
             continue
     print("❌ No Copilot CLI detected.")
-    return None
+    return None, None
 
-# === Generate tests (Copilot CLI or OpenAI fallback) ===
-def generate_tests(file_path: Path, specific_function: str = None):
+def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
     functions = extract_function_names(file_path)
     func_list = ", ".join(functions) if functions else "No functions found"
-    mod_path = module_import_path(file_path)
-    test_file = get_test_file_for_module(file_path.stem)
 
     if specific_function:
         prompt = (
-            f"Write detailed pytest tests for the function '{specific_function}' in {file_path.name}. "
-            f"Include valid, invalid, and edge-case inputs. Output only Python code."
+            f"Write detailed pytest tests for '{specific_function}' in {file_path.name}. "
+            f"Include success, edge, and invalid cases. Output valid Python code only."
         )
     else:
         prompt = (
-            f"The file {file_path.name} defines functions: {func_list}. "
-            f"Write runnable pytest test cases covering all of them with success, error, and boundary tests. "
-            f"Do not include explanations or markdown, output valid Python only."
+            f"The file {file_path.name} contains: {func_list}. "
+            f"Write runnable pytest tests for ALL functions (success, failure, edge). "
+            f"No explanations or markdown — Python code only."
         )
 
-    cli = detect_copilot_cli()
-    cleaned = ""
+    cli_cmd, mode = detect_copilot_cli()
+    if not cli_cmd:
+        print("❌ No Copilot CLI found. Skipping generation.")
+        return None
 
-    if cli:
-        print(f"🧠 Asking Copilot CLI for tests for: {file_path.name}")
-        cmd = f'{cli} suggest -p {json.dumps(prompt)}' if "copilot" in cli else f'{cli} generate -p {json.dumps(prompt)}'
-        try:
-            result = sh(cmd, capture=True)
-            cleaned = re.sub(r"```.*?```", "", result, flags=re.S).strip()
-        except Exception as e:
-            print(f"⚠️ CLI failed: {e}")
-    elif client:
-        print(f"🧠 Using GPT-4o fallback for: {file_path.name}")
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            cleaned = response.choices[0].message.content
-        except Exception as e:
-            print(f"⚠️ GPT fallback failed: {e}")
+    if mode == "generate":
+        cmd = f'{cli_cmd} generate -p {json.dumps(prompt)}'
+    else:
+        cmd = f'{cli_cmd} suggest -p {json.dumps(prompt)}'
+
+    print(f"🧠 Asking Copilot for tests for: {file_path.name}")
+    try:
+        result = sh(cmd, capture=True)
+    except SystemExit:
+        print(f"⚠️ Copilot CLI command failed: {cmd}")
+        return None
+
+    lines = []
+    for line in result.splitlines():
+        l = line.strip()
+        if not l or "copilot" in l.lower() or "visit" in l.lower():
+            continue
+        if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", l):
+            lines.append(line)
+        elif l.startswith(("    ", '"""', "'''")):
+            lines.append(line)
+    cleaned = "\n".join(lines).replace("```python", "").replace("```", "").strip()
+
+    mod_path = module_import_path(file_path)
+    test_file = get_test_file_for_module(file_path.stem)
 
     if not cleaned or "def test_" not in cleaned:
-        print(f"⚠️ No usable tests generated for {file_path.name}")
+        print(f"⚠️ Copilot returned no usable tests for {file_path.name}.")
         return None
 
     if "import pytest" not in cleaned:
         cleaned = f"import pytest\nfrom {mod_path} import *\n\n{cleaned}"
+
     test_file.write_text(cleaned.strip() + "\n")
     print(f"✅ Generated test file: {test_file}")
     return test_file
 
-# === Run pytest with coverage ===
 def run_pytest():
     print("🧪 Running pytest validation with coverage...")
     res = subprocess.run(
@@ -163,18 +131,16 @@ def run_pytest():
     print(res.stdout)
     return res.returncode == 0
 
-# === Git commit and push ===
 def git_commit_and_push(files):
     sh('git config user.name "ci-bot"')
     sh('git config user.email "ci-bot@users.noreply.github.com"')
     for f in files:
         if f and Path(f).exists():
             sh(f"git add {f}")
-    sh('git commit -m "auto: add pytest files generated by Copilot/GPT" || true', check=False)
+    sh('git commit -m "auto: add pytest files generated by Copilot" || true', check=False)
     sh('git push', check=False)
     print("🚀 Committed and pushed generated tests.")
 
-# === Rollback ===
 def rollback(files):
     for f in files:
         if f and Path(f).exists():
@@ -182,11 +148,10 @@ def rollback(files):
             print(f"🧹 Removed {f}")
     print("🧹 Rollback done.")
 
-# === Main entry ===
 if __name__ == "__main__":
     changed = get_changed_files()
     if not changed:
-        print("⚠️ No changed Python files found — forcing full scan.")
+        print("⚠️ No changed Python files found — scanning all src/ files.")
         changed = list(SRC.rglob("*.py"))
         if not changed:
             print("ℹ️ No src files found. Exiting.")
@@ -194,22 +159,12 @@ if __name__ == "__main__":
 
     generated = []
     for f in changed:
-        file = generate_tests(f)
+        file = generate_tests_with_copilot(f)
         if file:
             generated.append(file)
 
     if run_pytest():
-        print("✅ Initial tests passed — checking uncovered functions...")
-        for f in changed:
-            mod = module_import_path(f)
-            uncovered = find_uncovered_functions(mod)
-            if uncovered:
-                print(f"⚠️ Missing coverage in {mod}: {uncovered}")
-                for func in uncovered:
-                    newfile = generate_tests(f, func)
-                    if newfile:
-                        generated.append(newfile)
-        print("🚀 Committing improved tests.")
+        print("✅ Initial tests passed — committing generated tests.")
         git_commit_and_push(generated)
     else:
         print("❌ Tests failed — cleaning up generated files.")

@@ -7,124 +7,59 @@ on:
 jobs:
   ai-test-gen:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
       pull-requests: write
 
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PYTHONPATH: .
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
     steps:
-      # 🧱 1️⃣ Checkout full repository history (for diff comparison)
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.head_ref || github.ref_name }}
 
-      # 🗂️ 2️⃣ Ensure folder structure
       - name: Ensure folder structure
         run: |
           mkdir -p src tests .github/scripts
           echo "📂 Directory structure ready"
 
-      # 🤖 3️⃣ Install GitHub Copilot CLI (npm global) and dependencies
       - name: Install GitHub Copilot CLI
         run: |
-          echo "🧩 Installing GitHub Copilot CLI..."
+          echo "🧩 Installing GitHub Copilot CLI via npm..."
           sudo apt-get update -y
           sudo apt-get install -y npm jq
           sudo npm uninstall -g @githubnext/github-copilot-cli || true
           sudo npm install -g @githubnext/github-copilot-cli
-          echo "/usr/local/bin" >> $GITHUB_PATH
           echo "$(npm bin -g)" >> $GITHUB_PATH
-          echo "✅ CLI installation complete"
-          which github-copilot-cli || echo "⚠️ Copilot CLI not found — GPT fallback will be used"
-          github-copilot-cli --help | head -15 || true
+          which github-copilot-cli
+          github-copilot-cli --help | head -20 || true
 
-      # 🐍 4️⃣ Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 📦 5️⃣ Install Python dependencies (pytest, coverage, OpenAI SDK)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov coverage openai
-          echo "✅ Python dependencies installed."
+          pip install pytest pytest-cov coverage
 
-      # 🧠 6️⃣ Verify generator script
       - name: Verify generator script
         run: |
           if [ ! -f ".github/scripts/copilot_test_gen.py" ]; then
-            echo "❌ Missing .github/scripts/copilot_test_gen.py. Please commit it before running this workflow."
+            echo "❌ Missing copilot_test_gen.py"
             exit 1
           fi
-          echo "✅ Generator script found in repo."
+          echo "✅ Generator script found."
 
-      # ⚡ 7️⃣ Run Copilot Test Generator (includes fallback to GPT if needed)
       - name: Run Copilot Test Generator
         run: |
           echo "🚀 Starting Copilot Test Generator..."
           python .github/scripts/copilot_test_gen.py
-          echo "📊 Running pytest with coverage..."
-          pytest -q --disable-warnings --maxfail=1 \
-            --cov=src --cov-report=term --cov-report=xml \
-            | tee pytest_output.log
 
-      # 🧾 8️⃣ Post PR Comment Summary (with test counts + coverage)
-      - name: Post Copilot Test Summary on PR
+      - name: Post summary
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-          STATUS="${{ job.status }}"
-          echo "🔍 Collecting pytest results..."
-
-          TESTS_PASSED=0
-          TESTS_FAILED=0
-          PLACEHOLDER_COUNT=0
-          COVERAGE="N/A"
-
-          if [ -f pytest_output.log ]; then
-            TESTS_PASSED=$(grep -Eo "[0-9]+ passed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
-            TESTS_FAILED=$(grep -Eo "[0-9]+ failed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
-            COVERAGE_LINE=$(grep -E "TOTAL\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+%" pytest_output.log | tail -n1)
-            if [ -n "$COVERAGE_LINE" ]; then
-              COVERAGE=$(echo "$COVERAGE_LINE" | grep -Eo "[0-9]+%$" | tr -d '%')
-            fi
-          fi
-
-          PLACEHOLDER_COUNT=$(grep -R "test_placeholder" tests/ 2>/dev/null | wc -l || echo 0)
-
-          if [ "$STATUS" = "success" ] && [ "$TESTS_FAILED" -eq 0 ]; then
-            if [ "$PLACEHOLDER_COUNT" -gt 0 ]; then
-              RESULT="⚠️ $TESTS_PASSED passed, 0 failed ($PLACEHOLDER_COUNT placeholder)."
-            else
-              RESULT="✅ $TESTS_PASSED passed, 0 failed."
-            fi
-          elif [ "$TESTS_FAILED" -gt 0 ]; then
-            RESULT="❌ $TESTS_FAILED failed, $TESTS_PASSED passed."
-          else
-            RESULT="❌ Copilot test generation or pytest validation failed."
-          fi
-
-          if [ "$COVERAGE" != "N/A" ]; then
-            RESULT="$RESULT Coverage: ${COVERAGE}%."
-          fi
-
-          BODY="🤖 **AI Test Automation Summary**  
-          • Status: **$STATUS**  
-          • Result: $RESULT  
-          _Copilot CLI + GPT-4o fallback used for test generation._  
-          _Check workflow logs for details._"
-
-          echo "🧾 Posting comment to PR #$PR_NUMBER ..."
-          gh pr comment "$PR_NUMBER" --body "$BODY"
+          echo "✅ Copilot-based pytest generation completed."
