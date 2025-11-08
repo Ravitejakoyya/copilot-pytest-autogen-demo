@@ -2,13 +2,11 @@ import subprocess, sys, json, re, os, inspect, importlib, ast
 from pathlib import Path
 import coverage
 
-# === Base Paths ===
 BASE = Path(".").resolve()
 SRC = BASE / "src"
 TESTS = BASE / "tests"
 TESTS.mkdir(exist_ok=True)
 
-# === Utility: shell runner ===
 def sh(cmd, capture=False, check=True):
     print(f"$ {cmd}")
     result = subprocess.run(cmd, shell=True, text=True, capture_output=capture)
@@ -18,7 +16,6 @@ def sh(cmd, capture=False, check=True):
         sys.exit(result.returncode)
     return result.stdout if capture else ""
 
-# === Convert src path to Python import path ===
 def module_import_path(file_path: Path) -> str:
     abs_fp = file_path.resolve()
     rel_to_base = abs_fp.relative_to(BASE)
@@ -27,11 +24,9 @@ def module_import_path(file_path: Path) -> str:
         mod = f"src.{mod}"
     return mod
 
-# === Detect changed Python files ===
 def get_changed_files():
     subprocess.run(["git", "fetch", "origin", "main:refs/remotes/origin/main", "--depth=1"], check=False)
     base = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True).stdout.strip()
-
     if not base:
         print("⚠️ No merge base found — scanning all src/ files.")
         files = list(SRC.rglob("*.py"))
@@ -39,16 +34,20 @@ def get_changed_files():
         diff = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD"],
                               capture_output=True, text=True).stdout.strip()
         files = [BASE / Path(line) for line in diff.splitlines() if line.endswith(".py")]
-
     files = [f for f in files if f.exists() and "tests" not in str(f) and f.is_file() and str(f).startswith(str(SRC))]
     print(f"📂 Changed files detected: {files}")
     return files
 
-# === Always one canonical test file per module ===
 def get_test_file_for_module(stem: str) -> Path:
     return TESTS / f"test_{stem}.py"
 
-# === Detect uncovered functions from coverage ===
+def extract_function_names(file_path: Path):
+    try:
+        tree = ast.parse(file_path.read_text())
+        return [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    except Exception:
+        return []
+
 def find_uncovered_functions(module_name: str):
     try:
         cov = coverage.Coverage(data_file='.coverage')
@@ -73,67 +72,63 @@ def find_uncovered_functions(module_name: str):
                 missed.append(name)
     return missed
 
-# === Extract all function names from file using AST ===
-def extract_function_names(file_path: Path):
+# 🔧 Detect which CLI flavor is installed
+def detect_copilot_cli():
     try:
-        tree = ast.parse(file_path.read_text())
-        funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-        return funcs
-    except Exception:
-        return []
+        result = subprocess.run(["github-copilot-cli", "--help"], capture_output=True, text=True)
+        if "generate" in result.stdout:
+            print("✅ Detected new Copilot CLI with 'generate' command.")
+            return "generate"
+        elif "suggest" in result.stdout:
+            print("✅ Detected legacy Copilot CLI with 'suggest' command.")
+            return "suggest"
+    except FileNotFoundError:
+        pass
+    try:
+        result = subprocess.run(["gh", "copilot", "--help"], capture_output=True, text=True)
+        if "suggest" in result.stdout:
+            print("✅ Detected 'gh copilot' extension.")
+            return "gh"
+    except FileNotFoundError:
+        pass
+    print("❌ No Copilot CLI detected.")
+    return None
 
-# === Copilot Test Generation ===
 def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
     functions = extract_function_names(file_path)
     func_list = ", ".join(functions) if functions else "No functions found"
 
     if specific_function:
         prompt = (
-            f"You are a Python QA engineer. Write detailed pytest tests for the function '{specific_function}' "
-            f"in the file {file_path.name}. Include normal, edge, and invalid cases. Output only valid Python code."
+            f"Write detailed pytest tests for '{specific_function}' in {file_path.name}. "
+            f"Include edge, invalid, and normal cases. Output Python code only."
         )
     else:
         prompt = (
-            f"You are a senior Python QA engineer. The file {file_path.name} contains these functions: {func_list}. "
-            f"Write runnable pytest test cases covering EVERY function. Include success, failure, and edge-case scenarios. "
-            f"Do not include explanations or markdown formatting. Output Python code only."
+            f"The file {file_path.name} contains: {func_list}. "
+            f"Write runnable pytest tests for ALL functions with edge, success, and error cases. "
+            f"Do not include explanations or markdown. Output Python code only."
         )
 
-    print(f"🧠 Asking Copilot for tests for: {file_path.name}")
+    cli_type = detect_copilot_cli()
+    if not cli_type:
+        print("❌ No Copilot CLI found. Skipping generation.")
+        return None
 
-    version_check = subprocess.run(["gh", "help"], capture_output=True, text=True)
-    use_github_cli = False
-    if "copilot" in version_check.stdout.lower():
-        use_github_cli = True
-
-    # Build the command dynamically
-    if use_github_cli:
-        print("🔍 Using 'gh copilot' CLI for generation.")
-        version_help = subprocess.run(["gh", "copilot", "suggest", "--help"],
-                                      capture_output=True, text=True)
-        help_text = version_help.stdout.lower()
-        if "--prompt" in help_text:
-            cmd = f'gh copilot suggest --prompt {json.dumps(prompt)} --limit 1'
-        elif "-p" in help_text:
-            cmd = f'gh copilot suggest -p {json.dumps(prompt)} --limit 1'
-        else:
-            cmd = f'gh copilot suggest "{prompt}"'
-    else:
-        print("⚙️ 'gh copilot' not found — using 'github-copilot-cli' fallback.")
+    if cli_type == "generate":
+        cmd = f'github-copilot-cli generate -p {json.dumps(prompt)}'
+    elif cli_type == "suggest":
         cmd = f'github-copilot-cli suggest -p {json.dumps(prompt)}'
+    else:
+        cmd = f'gh copilot suggest -p {json.dumps(prompt)}'
 
-    # --- Run Copilot CLI (with fallback handling) ---
+    print(f"🧠 Asking Copilot for tests for: {file_path.name}")
     try:
         result = sh(cmd, capture=True)
     except SystemExit:
-        if "gh copilot" in cmd:
-            print("⚠️ 'gh copilot' failed — retrying with 'github-copilot-cli'.")
-            cmd = cmd.replace("gh copilot", "github-copilot-cli")
-            result = sh(cmd, capture=True)
-        else:
-            raise
+        print(f"⚠️ Copilot CLI command failed: {cmd}")
+        return None
 
-    # --- Clean Copilot output ---
     lines = []
     for line in result.splitlines():
         l = line.strip()
@@ -141,28 +136,21 @@ def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
             continue
         if re.match(r"^(import |from |def |class |@|assert|if |for |while |try|except|with |return|#)", l):
             lines.append(line)
-            continue
-        if l.startswith(("    ", '"""', "'''")):
+        elif l.startswith(("    ", '"""', "'''")):
             lines.append(line)
     cleaned = "\n".join(lines).replace("```python", "").replace("```", "").strip()
 
     mod_path = module_import_path(file_path)
     test_file = get_test_file_for_module(file_path.stem)
-
-    # Fallback safety: avoid committing empty test
     if not cleaned or "def test_" not in cleaned:
         print(f"⚠️ Copilot returned no usable tests for {file_path.name}.")
         return None
-
-    # Ensure valid imports
     if "import pytest" not in cleaned:
         cleaned = f"import pytest\nfrom {mod_path} import *\n\n{cleaned}"
-
     test_file.write_text(cleaned.strip() + "\n")
     print(f"✅ Generated test file: {test_file}")
     return test_file
 
-# === Run pytest with coverage ===
 def run_pytest():
     print("🧪 Running pytest validation with coverage...")
     res = subprocess.run(
@@ -173,7 +161,6 @@ def run_pytest():
     print(res.stdout)
     return res.returncode == 0
 
-# === Git commit and push ===
 def git_commit_and_push(files):
     sh('git config user.name "ci-bot"')
     sh('git config user.email "ci-bot@users.noreply.github.com"')
@@ -184,7 +171,6 @@ def git_commit_and_push(files):
     sh('git push', check=False)
     print("🚀 Committed and pushed generated tests.")
 
-# === Rollback failed test files ===
 def rollback(files):
     for f in files:
         if f and Path(f).exists():
@@ -192,7 +178,6 @@ def rollback(files):
             print(f"🧹 Removed {f}")
     print("🧹 Rollback done.")
 
-# === Entry point ===
 if __name__ == "__main__":
     changed = get_changed_files()
     if not changed:
