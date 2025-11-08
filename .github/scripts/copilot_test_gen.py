@@ -74,8 +74,8 @@ def find_uncovered_functions(module_name: str):
 
 
     if not shutil.which("github-copilot-cli"):
-    print("⚠️ Copilot CLI not found in PATH, trying to install it...")
-    os.system("sudo npm install -g @githubnext/github-copilot-cli")
+        print("⚠️ Copilot CLI not found in PATH, trying to install it...")
+        os.system("sudo npm install -g @githubnext/github-copilot-cli")
 
 
 # 🔧 Detect which CLI flavor is installed
