@@ -18,30 +18,51 @@ jobs:
       PYTHONPATH: .
 
     steps:
-      # 🧱 1️⃣ Checkout full repository history (so git diff works)
+      # 🧱 1️⃣ Checkout full repository history (for diff comparison)
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.head_ref || github.ref_name }}
 
-      # 🗂️ 2️⃣ Ensure directory structure exists
+      # 🗂️ 2️⃣ Ensure folder structure exists
       - name: Ensure folder structure
         run: |
           mkdir -p src tests .github/scripts
           echo "📂 Directory structure ready"
 
-      # 🤖 3️⃣ Install GitHub CLI and Copilot extension
-      - name: Install GitHub CLI and Copilot
+      - name: Install and Verify GitHub Copilot CLI
         run: |
+          echo "🧩 Installing GitHub Copilot CLI (npm global)..."
           sudo apt-get update -y
-          sudo apt-get install -y jq
-          gh extension install github/gh-copilot
-          echo "✅ Copilot CLI installed successfully."
-          gh --version
-          echo "🔑 Authenticating Copilot CLI..."
-          gh auth status || gh auth login --with-token <<< "${GITHUB_TOKEN}"
-          echo "🔐 Copilot CLI authenticated."
+          sudo apt-get install -y jq npm
+
+          # Clean any old install
+          sudo npm uninstall -g @githubnext/github-copilot-cli || true
+
+          # Install Copilot CLI globally
+          sudo npm install -g @githubnext/github-copilot-cli
+
+          # Add npm global bin to PATH
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          echo "$(npm bin -g)" >> $GITHUB_PATH
+
+          echo "✅ Verifying Copilot CLI installation..."
+          which github-copilot-cli || (echo "❌ CLI not found in PATH"; exit 1)
+          github-copilot-cli --help | head -20 || true
+
+
+    
+
+    #   # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
+    #   - name: Install GitHub Copilot CLI
+    #     run: |
+    #         sudo apt-get update -y
+    #         sudo apt-get install -y npm jq
+    #         echo "🧩 Installing GitHub Copilot CLI via npm..."
+    #         npm install -g @githubnext/github-copilot-cli
+    #         echo "✅ Copilot CLI installed successfully"
+    #         github-copilot-cli --help || echo "⚙️ Copilot CLI ready"
 
       # 🐍 4️⃣ Set up Python
       - name: Set up Python
@@ -53,9 +74,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov coverage
 
-      # 🧠 6️⃣ Verify generator script exists in repo
+      # 🧠 6️⃣ Verify generator script
       - name: Verify generator script
         run: |
           if [ ! -f ".github/scripts/copilot_test_gen.py" ]; then
@@ -64,13 +85,17 @@ jobs:
           fi
           echo "✅ Generator script found in repo."
 
-      # ⚡ 7️⃣ Run Copilot-based test generation
+      # ⚡ 7️⃣ Run Copilot Test Generator (generate → validate → commit)
       - name: Run Copilot Test Generator
         run: |
           echo "🚀 Starting Copilot Test Generator..."
           python .github/scripts/copilot_test_gen.py
+          echo "📊 Running pytest with coverage..."
+          pytest -q --disable-warnings --maxfail=1 \
+            --cov=src --cov-report=term --cov-report=xml \
+            | tee pytest_output.log
 
-            # 🧾 8️⃣ Post PR Comment Summary (dynamic result detection)
+      # 🧾 8️⃣ Post PR Comment Summary (with test counts + coverage)
       - name: Post Copilot Test Summary on PR
         if: always()
         env:
@@ -78,65 +103,44 @@ jobs:
         run: |
           PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
           STATUS="${{ job.status }}"
+          echo "🔍 Collecting pytest results..."
 
-          echo "🔍 Detecting test generation outcome..."
+          TESTS_PASSED=0
+          TESTS_FAILED=0
+          PLACEHOLDER_COUNT=0
+          COVERAGE="N/A"
 
-          # Check the workflow logs or generated files for key phrases
-          if grep -q "❌ Tests failed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="❌ Copilot test generation or pytest validation failed."
-          elif grep -q "⚠️ Copilot did not generate" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="⚠️ Copilot generated placeholder tests (CLI returned no output)."
-          elif grep -q "✅ Tests passed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-            SUMMARY="✅ Copilot test generation succeeded and pytest passed."
-          else
-            # If none of the above found, fallback based on job status
-            if [ "$STATUS" = "success" ]; then
-              SUMMARY="✅ Copilot test generation completed successfully."
-            else
-              SUMMARY="❌ Copilot test generation failed or encountered errors."
+          if [ -f pytest_output.log ]; then
+            TESTS_PASSED=$(grep -Eo "[0-9]+ passed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
+            TESTS_FAILED=$(grep -Eo "[0-9]+ failed" pytest_output.log | awk '{print $1}' | tail -n1 || echo 0)
+            COVERAGE_LINE=$(grep -E "TOTAL\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+%" pytest_output.log | tail -n1)
+            if [ -n "$COVERAGE_LINE" ]; then
+              COVERAGE=$(echo "$COVERAGE_LINE" | grep -Eo "[0-9]+%$" | tr -d '%')
             fi
           fi
 
-          echo "🧾 Preparing comment for PR #$PR_NUMBER ..."
+          PLACEHOLDER_COUNT=$(grep -R "test_placeholder" tests/ 2>/dev/null | wc -l || echo 0)
+
+          if [ "$STATUS" = "success" ] && [ "$TESTS_FAILED" -eq 0 ]; then
+            if [ "$PLACEHOLDER_COUNT" -gt 0 ]; then
+              RESULT="⚠️ $TESTS_PASSED passed, 0 failed ($PLACEHOLDER_COUNT placeholder)."
+            else
+              RESULT="✅ $TESTS_PASSED passed, 0 failed."
+            fi
+          elif [ "$TESTS_FAILED" -gt 0 ]; then
+            RESULT="❌ $TESTS_FAILED failed, $TESTS_PASSED passed."
+          else
+            RESULT="❌ Copilot test generation or pytest validation failed."
+          fi
+
+          if [ "$COVERAGE" != "N/A" ]; then
+            RESULT="$RESULT Coverage: ${COVERAGE}%."
+          fi
+
           BODY="🤖 **Copilot Test Automation Summary**  
           • Status: **$STATUS**  
-          • Result: $SUMMARY  
+          • Result: $RESULT  
           _Check workflow logs for details._"
 
+          echo "🧾 Posting comment to PR #$PR_NUMBER ..."
           gh pr comment "$PR_NUMBER" --body "$BODY"
-    
-
-
-
-    # # 🧾 8️⃣ Post PR Comment Summary
-    #   - name: Post Copilot Test Summary on PR
-    #     if: always()
-    #     env:
-    #       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #     run: |
-    #       PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-    #       STATUS="${{ job.status }}"
-    #       if grep -q "✅ Tests passed" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-    #         SUMMARY="✅ Copilot test generation succeeded and pytest passed."
-    #       elif grep -q "⚠️ Copilot did not generate" "${GITHUB_WORKSPACE}/.github/scripts/copilot_test_gen.py" 2>/dev/null; then
-    #         SUMMARY="⚠️ Copilot generated placeholder tests (CLI returned no output)."
-    #       else
-    #         SUMMARY="❌ Copilot test generation or pytest validation failed."
-    #       fi
-    #       BODY="🤖 **Copilot Test Automation Summary**  
-    #       • Status: **$STATUS**  
-    #       • Result: $SUMMARY  
-    #       _Check workflow logs for details._"
-    #       gh pr comment "$PR_NUMBER" --body "$BODY"
-    
-
-      # 🧾 8️⃣ (Optional) Post result summary comment on PR
-      # Uncomment below if you want Copilot test summary posted to PR
-      #
-      # - name: Post PR Comment Summary
-      #   if: always()
-      #   run: |
-      #     PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-      #     STATUS="${{ job.status }}"
-      #     BODY="🤖 **Copilot Test Generation Result:** $STATUS\nCheck workflow logs for details."
-      #     gh pr comment "$PR_NUMBER" --body "$BODY"
