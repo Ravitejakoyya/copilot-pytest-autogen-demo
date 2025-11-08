@@ -101,17 +101,39 @@ def generate_tests_with_copilot(file_path: Path, specific_function: str = None):
 
     print(f"🧠 Asking Copilot for tests for: {file_path.name}")
 
-    version_check = subprocess.run(["gh", "copilot", "suggest", "--help"],
-                                   capture_output=True, text=True)
-    help_text = version_check.stdout.lower()
-    if "--prompt" in help_text:
-        cmd = f'gh copilot suggest --prompt {json.dumps(prompt)} --limit 1'
-    elif "-p" in help_text:
-        cmd = f'gh copilot suggest -p {json.dumps(prompt)} --limit 1'
-    else:
-        cmd = f'gh copilot suggest "{prompt}"'
+    version_check = subprocess.run(["gh", "help"], capture_output=True, text=True)
+    use_github_cli = False
+    if "copilot" in version_check.stdout.lower():
+        use_github_cli = True
 
-    result = sh(cmd, capture=True)
+    # Build the command dynamically
+    if use_github_cli:
+        print("🔍 Using 'gh copilot' CLI for generation.")
+        version_help = subprocess.run(["gh", "copilot", "suggest", "--help"],
+                                      capture_output=True, text=True)
+        help_text = version_help.stdout.lower()
+        if "--prompt" in help_text:
+            cmd = f'gh copilot suggest --prompt {json.dumps(prompt)} --limit 1'
+        elif "-p" in help_text:
+            cmd = f'gh copilot suggest -p {json.dumps(prompt)} --limit 1'
+        else:
+            cmd = f'gh copilot suggest "{prompt}"'
+    else:
+        print("⚙️ 'gh copilot' not found — using 'github-copilot-cli' fallback.")
+        cmd = f'github-copilot-cli suggest -p {json.dumps(prompt)}'
+
+    # --- Run Copilot CLI (with fallback handling) ---
+    try:
+        result = sh(cmd, capture=True)
+    except SystemExit:
+        if "gh copilot" in cmd:
+            print("⚠️ 'gh copilot' failed — retrying with 'github-copilot-cli'.")
+            cmd = cmd.replace("gh copilot", "github-copilot-cli")
+            result = sh(cmd, capture=True)
+        else:
+            raise
+
+    # --- Clean Copilot output ---
     lines = []
     for line in result.splitlines():
         l = line.strip()

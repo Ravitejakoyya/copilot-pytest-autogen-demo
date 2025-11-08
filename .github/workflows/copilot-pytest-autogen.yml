@@ -32,19 +32,14 @@ jobs:
           echo "📂 Directory structure ready"
 
       # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
-      - name: Install GitHub CLI and Copilot CLI
+      - name: Install GitHub Copilot CLI
         run: |
             sudo apt-get update -y
             sudo apt-get install -y npm jq
             echo "🧩 Installing GitHub Copilot CLI via npm..."
             npm install -g @githubnext/github-copilot-cli
             echo "✅ Copilot CLI installed successfully"
-            gh --version
-            echo "alias gh='github-copilot-cli'" >> ~/.bashrc
-            source ~/.bashrc
-            echo "✅ Aliased gh -> github-copilot-cli"
-            github-copilot-cli --help || echo "⚠️ Copilot CLI check complete"
-
+            github-copilot-cli --help || echo "⚙️ Copilot CLI ready"
 
       # 🐍 4️⃣ Set up Python
       - name: Set up Python
