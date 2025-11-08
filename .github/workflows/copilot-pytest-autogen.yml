@@ -31,15 +31,31 @@ jobs:
           mkdir -p src tests .github/scripts
           echo "📂 Directory structure ready"
 
-      # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
-      - name: Install GitHub Copilot CLI
+      - name: Install GitHub CLI + Copilot CLI
         run: |
             sudo apt-get update -y
-            sudo apt-get install -y npm jq
+            sudo apt-get install -y jq npm
             echo "🧩 Installing GitHub Copilot CLI via npm..."
+            
+            # Install global Copilot CLI
             npm install -g @githubnext/github-copilot-cli
+            
+            # Verify installation and available commands
+            which github-copilot-cli || echo "⚠️ CLI not in PATH!"
+            github-copilot-cli --help || true
+            
             echo "✅ Copilot CLI installed successfully"
-            github-copilot-cli --help || echo "⚙️ Copilot CLI ready"
+    
+
+    #   # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
+    #   - name: Install GitHub Copilot CLI
+    #     run: |
+    #         sudo apt-get update -y
+    #         sudo apt-get install -y npm jq
+    #         echo "🧩 Installing GitHub Copilot CLI via npm..."
+    #         npm install -g @githubnext/github-copilot-cli
+    #         echo "✅ Copilot CLI installed successfully"
+    #         github-copilot-cli --help || echo "⚙️ Copilot CLI ready"
 
       # 🐍 4️⃣ Set up Python
       - name: Set up Python
