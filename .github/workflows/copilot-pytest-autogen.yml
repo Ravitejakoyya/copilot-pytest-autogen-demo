@@ -16,6 +16,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PYTHONPATH: .
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       # 🧱 1️⃣ Checkout full repository history (for diff comparison)
@@ -25,44 +26,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.head_ref || github.ref_name }}
 
-      # 🗂️ 2️⃣ Ensure folder structure exists
+      # 🗂️ 2️⃣ Ensure folder structure
       - name: Ensure folder structure
         run: |
           mkdir -p src tests .github/scripts
           echo "📂 Directory structure ready"
 
-      - name: Install and Verify GitHub Copilot CLI
+      # 🤖 3️⃣ Install GitHub Copilot CLI (npm global) and dependencies
+      - name: Install GitHub Copilot CLI
         run: |
-          echo "🧩 Installing GitHub Copilot CLI (npm global)..."
+          echo "🧩 Installing GitHub Copilot CLI..."
           sudo apt-get update -y
-          sudo apt-get install -y jq npm
-
-          # Clean any old install
+          sudo apt-get install -y npm jq
           sudo npm uninstall -g @githubnext/github-copilot-cli || true
-
-          # Install Copilot CLI globally
           sudo npm install -g @githubnext/github-copilot-cli
-
-          # Add npm global bin to PATH
           echo "/usr/local/bin" >> $GITHUB_PATH
           echo "$(npm bin -g)" >> $GITHUB_PATH
-
-          echo "✅ Verifying Copilot CLI installation..."
-          which github-copilot-cli || (echo "❌ CLI not found in PATH"; exit 1)
-          github-copilot-cli --help | head -20 || true
-
-
-    
-
-    #   # 🤖 3️⃣ Install GitHub CLI + Copilot CLI
-    #   - name: Install GitHub Copilot CLI
-    #     run: |
-    #         sudo apt-get update -y
-    #         sudo apt-get install -y npm jq
-    #         echo "🧩 Installing GitHub Copilot CLI via npm..."
-    #         npm install -g @githubnext/github-copilot-cli
-    #         echo "✅ Copilot CLI installed successfully"
-    #         github-copilot-cli --help || echo "⚙️ Copilot CLI ready"
+          echo "✅ CLI installation complete"
+          which github-copilot-cli || echo "⚠️ Copilot CLI not found — GPT fallback will be used"
+          github-copilot-cli --help | head -15 || true
 
       # 🐍 4️⃣ Set up Python
       - name: Set up Python
@@ -70,11 +52,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 📦 5️⃣ Install dependencies
+      # 📦 5️⃣ Install Python dependencies (pytest, coverage, OpenAI SDK)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov coverage
+          pip install pytest pytest-cov coverage openai
+          echo "✅ Python dependencies installed."
 
       # 🧠 6️⃣ Verify generator script
       - name: Verify generator script
@@ -85,7 +68,7 @@ jobs:
           fi
           echo "✅ Generator script found in repo."
 
-      # ⚡ 7️⃣ Run Copilot Test Generator (generate → validate → commit)
+      # ⚡ 7️⃣ Run Copilot Test Generator (includes fallback to GPT if needed)
       - name: Run Copilot Test Generator
         run: |
           echo "🚀 Starting Copilot Test Generator..."
@@ -137,9 +120,10 @@ jobs:
             RESULT="$RESULT Coverage: ${COVERAGE}%."
           fi
 
-          BODY="🤖 **Copilot Test Automation Summary**  
+          BODY="🤖 **AI Test Automation Summary**  
           • Status: **$STATUS**  
           • Result: $RESULT  
+          _Copilot CLI + GPT-4o fallback used for test generation._  
           _Check workflow logs for details._"
 
           echo "🧾 Posting comment to PR #$PR_NUMBER ..."
